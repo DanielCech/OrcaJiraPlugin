@@ -1,0 +1,85 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "execution": "trusted-worker",
+  "id": "jira-branch-link",
+  "name": "Jira Branch Link",
+  "version": "1.1.0",
+  "description": "Finds the Jira issue key (e.g. PROJ-123) in the focused workspace's branch name, shows it in the status bar, opens it in Jira and shows the issue in a sidebar panel.",
+  "license": "MIT",
+  "engines": { "orca": ">=1.4.248" },
+  "pluginApi": 1,
+  "main": "worker/main.mjs",
+  "contributes": {
+    "panels": [
+      {
+        "id": "issue",
+        "title": "Jira Issue",
+        "icon": "link",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "commands": [
+      { "id": "jira.openCurrent", "title": "Jira: Open Issue for Current Branch", "when": "workspace" },
+      { "id": "jira.refresh", "title": "Jira: Refresh Issue", "when": "workspace" }
+    ],
+    "keybindings": [
+      { "command": "jira.openCurrent", "key": "Mod+Alt+J", "when": "workspace" }
+    ],
+    "statusBarItems": [
+      {
+        "id": "issue",
+        "icon": "link",
+        "text": "Jira",
+        "tooltip": "Open the Jira issue for this branch",
+        "command": "jira.openCurrent"
+      }
+    ],
+    "events": [{ "on": "workspace.changed" }],
+    "settings": [
+      {
+        "key": "baseUrl",
+        "title": "Jira URL",
+        "description": "Your Jira site: a full URL (https://jira.example.com) or just the Atlassian Cloud site name (your-company becomes https://your-company.atlassian.net). Issues open at <Jira URL>/browse/<KEY>.",
+        "type": "string",
+        "default": "",
+        "placeholder": "your-company or https://your-company.atlassian.net"
+      },
+      {
+        "key": "siteOverrides",
+        "title": "Other Jira sites by project key",
+        "description": "Optional, one per line: PROJECT=https://client.atlassian.net. Keys not listed use the Jira URL above.",
+        "type": "string",
+        "multiline": true,
+        "default": "",
+        "placeholder": "ABC=https://client.atlassian.net"
+      },
+      {
+        "key": "email",
+        "title": "Atlassian account email",
+        "description": "Needed only to show issue details inside Orca (with an API token entered in the Jira Issue panel).",
+        "type": "string",
+        "default": ""
+      },
+      {
+        "key": "lowercaseKeys",
+        "title": "Also match lowercase keys",
+        "description": "Find keys like feature/proj-123-login too. Off by default, because names such as fix-2-buttons would then look like issue keys.",
+        "type": "boolean",
+        "default": false
+      },
+      {
+        "key": "statusBarSummary",
+        "title": "Show issue summary in the status bar",
+        "type": "boolean",
+        "default": true
+      }
+    ]
+  },
+  "capabilities": [
+    { "kind": "workspace:read" },
+    { "kind": "settings:own" },
+    { "kind": "secrets:own" }
+  ]
+}
