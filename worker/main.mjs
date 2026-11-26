@@ -9,6 +9,11 @@ const KEY_RE = /(?:^|[^A-Za-z0-9])([A-Z][A-Z0-9]{1,9}-\d+)(?!\d)/
 const KEY_RE_ANY_CASE = /(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9]{1,9}-\d+)(?!\d)/
 const CACHE_MS = 60_000
 const TOKEN_SECRET = 'apiToken'
+/** Raw bytes per attachment chunk: base64 makes it ~933 KB, under Orca's 1 MiB answer limit. */
+export const CHUNK_BYTES = 700_000
+/** Downloaded attachments kept in memory, oldest dropped first. */
+const MEDIA_CACHE_MAX_BYTES = 200 * 1024 * 1024
+const DEFAULT_MAX_MEDIA_MB = 50
 
 /** @param {string | null | undefined} branch @param {{ lowercase?: boolean }} [options] */
 export function extractKey(branch, { lowercase = false } = {}) {
@@ -131,7 +136,7 @@ function block(node, indent = '') {
         .join('\n')
     case 'mediaSingle':
     case 'mediaGroup':
-      return '_(attachment – open the issue in Jira to see it)_'
+      return '_(attachment – see the Jira Attachments panel)_'
     default:
       return children.length ? children.map((c) => block(c, indent)).join('\n') : inline(node)
   }
@@ -142,6 +147,30 @@ export function adfToMarkdown(adf) {
   if (!adf) return ''
   if (typeof adf === 'string') return adf
   return block(adf).trim()
+}
+
+// ---------- Attachments ----------
+
+/** @param {any} list @param {string} site */
+export function toAttachments(list, site) {
+  if (!Array.isArray(list)) return []
+  return list
+    .filter((a) => a && a.id != null)
+    .map((a) => {
+      const filename = String(a.filename ?? 'file')
+      return {
+        id: String(a.id),
+        filename,
+        mimeType: String(a.mimeType ?? 'application/octet-stream'),
+        size: Number(a.size) || 0,
+        created: a.created ? Date.parse(a.created) : null,
+        author: a.author?.displayName ?? null,
+        hasThumbnail: Boolean(a.thumbnail),
+        // The classic attachment URL: opens with the browser's own Jira login.
+        browserUrl: `${site}/secure/attachment/${encodeURIComponent(String(a.id))}/${encodeURIComponent(filename)}`
+      }
+    })
+    .sort((a, b) => (b.created ?? 0) - (a.created ?? 0))
 }
 
 // ---------- Worker ----------
@@ -209,6 +238,49 @@ export default async function activate(orca) {
     return id
   }
 
+  /** @type {Map<string, string>} site -> the base URL that accepted the token last time */
+  const workingBase = new Map()
+
+  /**
+   * GET a Jira REST path with Basic auth. API tokens "with scopes" only work through the Atlassian
+   * API gateway, not the site URL, so a refused call is retried there and the winner remembered.
+   * @param {string} site @param {string} path @param {{ email: string; token: string }} creds
+   * @param {{ timeoutMs?: number; accept?: string }} [options]
+   */
+  async function jiraFetch(site, path, creds, { timeoutMs = 15_000, accept = 'application/json' } = {}) {
+    const get = (base) =>
+      fetch(base + path, {
+        headers: {
+          Accept: accept,
+          Authorization: 'Basic ' + Buffer.from(`${creds.email}:${creds.token}`).toString('base64')
+        },
+        signal: AbortSignal.timeout(timeoutMs)
+      })
+    const remembered = workingBase.get(site)
+    if (remembered && remembered !== site) {
+      const res = await get(remembered)
+      if (res.ok) return res
+    }
+    let res = await get(site)
+    if (res.ok) {
+      workingBase.set(site, site)
+      return res
+    }
+    if (res.status === 401 || res.status === 403 || res.status === 404) {
+      const cloudId = await cloudIdFor(site)
+      if (cloudId) {
+        const gateway = `https://api.atlassian.com/ex/jira/${cloudId}`
+        const viaGateway = await get(gateway)
+        if (viaGateway.ok) {
+          workingBase.set(site, gateway)
+          return viaGateway
+        }
+        if (res.status !== 404) res = viaGateway
+      }
+    }
+    return res
+  }
+
   async function resolve(branch) {
     const key = extractKey(branch, { lowercase: (await setting('lowercaseKeys')) === true })
     if (!key) return { branch, key: null, url: null, site: null }
@@ -231,25 +303,8 @@ export default async function activate(orca) {
       return
     }
     try {
-      const fields = 'summary,status,issuetype,priority,assignee,reporter,updated,description'
-      const path = `/rest/api/3/issue/${encodeURIComponent(key)}?fields=${fields}`
-      const get = (base) =>
-        fetch(base + path, {
-          headers: {
-            Accept: 'application/json',
-            Authorization: 'Basic ' + Buffer.from(`${creds.email}:${creds.token}`).toString('base64')
-          },
-          signal: AbortSignal.timeout(15_000)
-        })
-      let res = await get(site)
-      // API tokens "with scopes" only work through the Atlassian API gateway, not the site URL.
-      if (res.status === 401 || res.status === 403 || res.status === 404) {
-        const cloudId = await cloudIdFor(site)
-        if (cloudId) {
-          const viaGateway = await get(`https://api.atlassian.com/ex/jira/${cloudId}`)
-          if (viaGateway.ok || res.status !== 404) res = viaGateway
-        }
-      }
+      const fields = 'summary,status,issuetype,priority,assignee,reporter,updated,description,attachment'
+      const res = await jiraFetch(site, `/rest/api/3/issue/${encodeURIComponent(key)}?fields=${fields}`, creds)
       if (!res.ok) {
         orca.log(`GET ${key} on ${site}: ${res.status} ${res.statusText}`)
         lastError =
@@ -271,7 +326,8 @@ export default async function activate(orca) {
           assignee: f.assignee?.displayName ?? null,
           reporter: f.reporter?.displayName ?? null,
           updated: f.updated ? Date.parse(f.updated) : null,
-          description: truncate(adfToMarkdown(f.description), 12_000)
+          description: truncate(adfToMarkdown(f.description), 12_000),
+          attachments: toAttachments(f.attachment, site)
         }
       }
     } catch (error) {
@@ -291,6 +347,7 @@ export default async function activate(orca) {
       hasCredentials: Boolean(email && token),
       email,
       hasToken: Boolean(token),
+      maxMediaBytes: await maxMediaBytes(),
       issue: lastIssue && lastIssue.key === current.key ? lastIssue : null,
       error: lastError
     }
@@ -338,6 +395,7 @@ export default async function activate(orca) {
 
   orca.settings.onDidChange(() => {
     cache.clear()
+    clearMedia()
     void refresh(current.branch, { force: true })
   })
 
@@ -370,6 +428,112 @@ export default async function activate(orca) {
       await refresh(current.branch, { force: true })
     }
     return state()
+  })
+
+  // ---------- Attachments: downloaded here (the panel frame has no network), sent in chunks ----------
+
+  async function maxMediaBytes() {
+    const mb = Number(await setting('maxMediaMB'))
+    return Math.round((Number.isFinite(mb) && mb > 0 ? Math.min(mb, 500) : DEFAULT_MAX_MEDIA_MB) * 1024 * 1024)
+  }
+
+  /** @type {Map<string, { mimeType: string; bytes: Buffer }>} insertion order = least recently used first */
+  const media = new Map()
+  let mediaBytes = 0
+  /** @type {Map<string, Promise<{ mimeType: string; bytes: Buffer }>>} */
+  const downloads = new Map()
+
+  function clearMedia() {
+    media.clear()
+    mediaBytes = 0
+  }
+
+  /** @param {string} cacheKey @param {{ mimeType: string; bytes: Buffer }} entry */
+  function remember(cacheKey, entry) {
+    media.set(cacheKey, entry)
+    mediaBytes += entry.bytes.length
+    for (const [k, v] of media) {
+      if (mediaBytes <= MEDIA_CACHE_MAX_BYTES || k === cacheKey) break
+      media.delete(k)
+      mediaBytes -= v.bytes.length
+    }
+  }
+
+  /** @param {string} site @param {any} attachment @param {'thumbnail' | 'content'} kind */
+  async function download(site, attachment, kind) {
+    const cacheKey = `${site}|${attachment.id}|${kind}`
+    const hit = media.get(cacheKey)
+    if (hit) {
+      media.delete(cacheKey) // re-insert: most recently used
+      media.set(cacheKey, hit)
+      return hit
+    }
+    const running = downloads.get(cacheKey)
+    if (running) return running
+    const job = (async () => {
+      const creds = await credentials()
+      if (!creds) throw new Error('No Jira email and API token set.')
+      const path =
+        kind === 'thumbnail'
+          ? `/rest/api/3/attachment/thumbnail/${attachment.id}?fallbackToDefault=false`
+          : `/rest/api/3/attachment/content/${attachment.id}`
+      // Jira answers with a redirect to its media service; fetch follows it.
+      const res = await jiraFetch(site, path, creds, { timeoutMs: 120_000, accept: '*/*' })
+      if (!res.ok) {
+        orca.log(`GET attachment ${attachment.id} (${kind}): ${res.status} ${res.statusText}`)
+        throw new Error(
+          res.status === 401 || res.status === 403
+            ? `Jira refused the download (${res.status}). A scoped token needs read:jira-work.`
+            : `Jira answered ${res.status} ${res.statusText}.`
+        )
+      }
+      const bytes = Buffer.from(await res.arrayBuffer())
+      const header = res.headers.get('content-type')?.split(';')[0].trim()
+      const mimeType =
+        kind === 'content' || !header || header === 'application/octet-stream'
+          ? attachment.mimeType || header || 'application/octet-stream'
+          : header
+      const entry = { mimeType, bytes }
+      remember(cacheKey, entry)
+      return entry
+    })()
+    downloads.set(cacheKey, job)
+    try {
+      return await job
+    } finally {
+      downloads.delete(cacheKey)
+    }
+  }
+
+  orca.panels.handle('jira.attachment', async (input) => {
+    const { id, kind, offset } = /** @type {{ id?: unknown; kind?: unknown; offset?: unknown }} */ (input ?? {})
+    const issue = lastIssue && lastIssue.key === current.key ? lastIssue : null
+    const attachment = issue?.attachments?.find((a) => a.id === id)
+    if (!current.site || !attachment) {
+      return { ok: false, error: 'This attachment is not on the current issue any more. Refresh the panel.' }
+    }
+    if (kind !== 'thumbnail' && kind !== 'content') return { ok: false, error: 'Unknown kind.' }
+    if (kind === 'content') {
+      const limit = await maxMediaBytes()
+      if (attachment.size > limit) {
+        return { ok: false, tooLarge: true, error: `Larger than the ${Math.round(limit / 1048576)} MB limit in Settings.` }
+      }
+    }
+    try {
+      const { mimeType, bytes } = await download(current.site, attachment, kind)
+      const start = Math.max(0, Math.min(bytes.length, Number(offset) || 0))
+      const end = Math.min(bytes.length, start + CHUNK_BYTES)
+      return {
+        ok: true,
+        mimeType,
+        size: bytes.length,
+        offset: start,
+        data: bytes.subarray(start, end).toString('base64'),
+        done: end >= bytes.length
+      }
+    } catch (error) {
+      return { ok: false, error: error?.message ?? String(error) }
+    }
   })
 
   // First state, before any event arrives.

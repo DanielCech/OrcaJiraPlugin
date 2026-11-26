@@ -11,6 +11,7 @@ In Orca every task usually gets its own worktree and branch, and the branch name
 - **Status bar item**: shows the key of the focused workspace's issue (with your token, also its summary, colored by status category). Click it to open the issue in your browser.
 - **Command** `Jira: Open Issue for Current Branch` (`Cmd+Alt+J` / `Ctrl+Alt+J`), and `Jira: Refresh Issue`.
 - **Jira Issue panel** in the right sidebar: key, status, summary, type, priority, assignee, reporter, last update and the description rendered as Markdown.
+- **Jira Attachments panel** in the right sidebar: a thumbnail grid of the issue's attachments, an image viewer (click to zoom), a video and audio player, **Save…** and **Open in browser**. Use `←` / `→` to step through and `Esc` to go back.
 - **Works with any Jira**: Atlassian Cloud or self-hosted, and several sites at once (per project key).
 - **Follows focus**: switching workspaces updates the status bar and the panel right away. Issues are cached for 60 seconds.
 
@@ -86,7 +87,7 @@ Issues open at `<Jira URL>/browse/<KEY>`.
 
 ### 2. (Optional) Show issue details inside Orca
 
-Opening issues in the browser needs no login. To see the details in the panel and the summary in the status bar:
+Opening issues in the browser needs no login. To see the details and attachments in Orca and the summary in the status bar:
 
 1. Create an API token at **id.atlassian.com → Security → API tokens**. A classic token works. With a scoped token, grant `read:jira-work`.
 2. Open the **Jira Issue** panel (right sidebar), enter the **email of the Atlassian account** that created the token, paste the token and press **Save**.
@@ -103,6 +104,7 @@ Scoped tokens only work through the Atlassian API gateway. The plugin handles th
 | Other Jira sites by project key | empty | One per line, `PROJECT=site`, for projects that live on another Jira, e.g. `ABC=client-company` or `ABC=https://jira.client.com` |
 | Atlassian account email | empty | Needed only for issue details (together with the API token) |
 | Also match lowercase keys | off | Also finds `feature/proj-123-login` |
+| Max attachment size to show in Orca (MB) | 50 | Larger files are not downloaded into the Attachments panel; open them in the browser instead |
 | Show issue summary in the status bar | on | `PROJ-123 · Login screen` instead of only `PROJ-123` |
 
 ## Permissions
@@ -113,7 +115,19 @@ Scoped tokens only work through the Atlassian API gateway. The plugin handles th
 | `settings:own` | Read and write the plugin's own settings |
 | `secrets:own` | Store the API token encrypted |
 
-The worker talks only to your configured Jira site(s): `GET /rest/api/3/issue/<KEY>`, `/_edge/tenant_info` (to find the cloud id), and `api.atlassian.com` for scoped tokens. It opens issue links with the system browser.
+The worker talks only to your configured Jira site(s): `GET /rest/api/3/issue/<KEY>`, `/rest/api/3/attachment/thumbnail|content/<id>` (Jira redirects these to its media service), `/_edge/tenant_info` (to find the cloud id), and `api.atlassian.com` for scoped tokens. It opens links with the system browser.
+
+## How the Attachments panel works
+
+Orca's component panels can only show images bundled with the plugin, so the Attachments panel is an HTML panel. HTML panels may show `blob:` images and video, but they have no network access. So the worker downloads each file with your Jira login and passes it to the panel in base64 chunks of about 700 KB, because Orca caps each answer at 1 MiB. The panel joins the chunks into a `Blob`.
+
+- Thumbnails load as soon as the panel opens. Full files download only when you open them, with a progress bar.
+- Downloads are cached in the worker (up to 200 MB, oldest dropped first), so switching between workspaces does not download them again.
+- Orca allows a panel 120 requests per 10 seconds, which works out to about 8 MB per 10 seconds. That is why there is a size limit setting; larger files open in the browser.
+- Files with no preview (zip, pdf, …) are not downloaded. You get **Open in browser** instead.
+- `.mov` screen recordings are handed to the player as MP4, which plays H.264 recordings. Files it can't play show **Save…** / **Open in browser**.
+
+More detail: [docs/images-and-videos.md](docs/images-and-videos.md).
 
 ## Troubleshooting
 
@@ -129,7 +143,8 @@ The worker talks only to your configured Jira site(s): `GET /rest/api/3/issue/<K
 ```text
 orca-plugin.json   manifest: panel, commands, keybinding, status bar item, settings, capabilities
 worker/main.mjs    trusted worker: follows focus, extracts the key, calls Jira, converts ADF to Markdown
-src/panel.tsx      "components" panel (no build step: Orca strips types and compiles JSX on load)
+src/panel.tsx      Jira Issue: "components" panel (no build step: Orca strips types and compiles JSX on load)
+src/attachments.ts Jira Attachments: "html" panel, plain DOM, chunked downloads from the worker
 src/protocol.ts    the panel <-> worker contract (request and event types)
 docs/              design notes
 ```
@@ -140,14 +155,16 @@ Useful commands:
 orca plugin types .            # write TypeScript typings into .orca/types (git-ignored)
 orca plugin check .            # validate the manifest and render the panel once
 orca plugin dev watch .        # load, then stream logs and reload on change
-orca plugin shot <plugin> issue  # PNG of the panel as Orca draws it
+orca plugin shot <plugin> issue        # PNG of a panel as Orca draws it (also: attachments)
 ```
 
 The pure helpers (`extractKey`, `normalizeBase`, `parseOverrides`, `siteFor`, `adfToMarkdown`) are exported from `worker/main.mjs`, so you can test them with plain Node.
 
+`node tests/worker.test.mjs` runs the worker against a mocked Orca host and a mocked Jira (issue fetch, attachment chunking, cache, size cap). It needs no dependencies.
+
 ## Roadmap
 
-- **Images and videos from the issue in the panel**: possible, with a different panel type. See [docs/images-and-videos.md](docs/images-and-videos.md).
+- Show images inline in the description where they appear in Jira (the ADF `media` nodes).
 - Transition the issue status from Orca.
 - Show linked pull requests and sub-tasks.
 

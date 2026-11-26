@@ -1,6 +1,8 @@
 # Images and videos in the Jira Issue panel
 
-**Short answer: yes, it is possible, but not with the current `"ui": "components"` panel. It needs an HTML ("isolated frame") panel, and the worker must download the attachments for it.**
+> **Status: implemented in 1.2.0** as the **Jira Attachments** panel (`src/attachments.ts`, `"ui": "html"`). It was added as a second panel, option 2 below. This note records why it is built this way.
+
+**Short answer: possible, but not with a `"ui": "components"` panel. It needs an HTML ("isolated frame") panel, and the worker must download the attachments for it.**
 
 Findings come from Orca 1.4.277: its plugin typings (`orca plugin types`) and the frame security policy inside the app bundle.
 

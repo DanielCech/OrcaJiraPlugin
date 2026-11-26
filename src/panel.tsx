@@ -247,6 +247,12 @@ export default function Panel() {
               Updated <RelativeTime at={issue.updated} />
             </Text>
           ) : null}
+          {issue.attachments?.length ? (
+            <Text muted size="sm">
+              📎 {issue.attachments.length} attachment{issue.attachments.length === 1 ? '' : 's'}: open the
+              Jira Attachments panel to view images and videos.
+            </Text>
+          ) : null}
           {issue.description ? (
             <Markdown content={issue.description} />
           ) : (

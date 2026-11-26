@@ -4,7 +4,7 @@
   "execution": "trusted-worker",
   "id": "jira-branch-link",
   "name": "Jira Branch Link",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Finds the Jira issue key (e.g. PROJ-123) in the focused workspace's branch name, shows it in the status bar, opens it in Jira and shows the issue in a sidebar panel.",
   "license": "MIT",
   "engines": { "orca": ">=1.4.248" },
@@ -18,6 +18,13 @@
         "icon": "link",
         "entry": "src/panel.tsx",
         "ui": "components"
+      },
+      {
+        "id": "attachments",
+        "title": "Jira Attachments",
+        "icon": "file",
+        "entry": "src/attachments.ts",
+        "ui": "html"
       }
     ],
     "commands": [
@@ -68,6 +75,13 @@
         "description": "Find keys like feature/proj-123-login too. Off by default, because names such as fix-2-buttons would then look like issue keys.",
         "type": "boolean",
         "default": false
+      },
+      {
+        "key": "maxMediaMB",
+        "title": "Max attachment size to show in Orca (MB)",
+        "description": "Larger attachments are not downloaded into the Jira Attachments panel; open them in the browser instead.",
+        "type": "number",
+        "default": 50
       },
       {
         "key": "statusBarSummary",
